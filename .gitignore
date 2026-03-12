@@ -1,0 +1,88 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python environment managers
+.python-version
+Pipfile.lock
+
+# Cache, test and typing artifacts
+.pytest_cache/
+.mypy_cache/
+.cache/
+htmlcov/
+.coverage
+
+# Jupyter
+.ipynb_checkpoints
+
+# Logs
+*.log
+logs/
+
+# Databases and local data
+*.sqlite3
+db.sqlite3
+*.db
+*.db-journal
+
+# Large model / vectorstore caches (LangChain / ML)
+models/
+hf_model/
+transformers_cache/
+huggingface/
+chroma.db
+vectorstore/
+vectordb/
+faiss_index/
+*.pt
+*.bin
+*.onnx
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+service_account.json
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+
+# Node (if present)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Misc
+*.egg
+*.log
