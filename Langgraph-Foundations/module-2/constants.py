@@ -1,0 +1,1 @@
+MODEL = "minimax-m2.5:cloud"
