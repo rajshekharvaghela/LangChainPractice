@@ -6,14 +6,15 @@ from typing_extensions import TypedDict
 from langchain_community.document_loaders import WikipediaLoader
 from langchain_tavily import TavilySearch  # updated 1.0
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, get_buffer_string
-from langchain_openai import ChatOpenAI
+# from langchain_openai import ChatOpenAI
+from constants import llm
 
 from langgraph.constants import Send
 from langgraph.graph import END, MessagesState, START, StateGraph
 
 ### LLM
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0) 
+# llm = ChatOpenAI(model="gpt-4o", temperature=0) 
 
 ### Schema 
 
@@ -81,7 +82,24 @@ analyst_instructions="""You are tasked with creating a set of AI analyst persona
                     
 4. Pick the top {max_analysts} themes.
 
-5. Assign one analyst to each theme."""
+5. Assign one analyst to each theme.
+
+Return ONLY a JSON object matching the Pydantic model `Perspectives`:
+{{
+  "analysts": [
+    {{
+      "affiliation": "<string - organization or role>",
+      "name": "<string - person's name>",
+      "role": "<string - short role>",
+      "description": "<string - one-paragraph description (use complete sentences)>"
+    }}
+  ]
+}}
+
+Example:
+{{"analysts":[{{"affiliation":"Open Research Lab","name":"Dr. Sarah Chen","role":"Technical Architecture Analyst","description":"Focuses on graph-based agent design and stateful orchestration."}}]}}
+If you cannot provide a value for a field, set it to an empty string "".
+Do not add any text outside the JSON."""
 
 def create_analysts(state: GenerateAnalystsState):
     
@@ -91,16 +109,37 @@ def create_analysts(state: GenerateAnalystsState):
     max_analysts=state['max_analysts']
     human_analyst_feedback=state.get('human_analyst_feedback', '')
         
-    # Enforce structured output
-    structured_llm = llm.with_structured_output(Perspectives)
-
     # System message
     system_message = analyst_instructions.format(topic=topic,
                                                             human_analyst_feedback=human_analyst_feedback, 
                                                             max_analysts=max_analysts)
 
-    # Generate question 
-    analysts = structured_llm.invoke([SystemMessage(content=system_message)]+[HumanMessage(content="Generate the set of analysts.")])
+    try:
+        # Try structured output with json_mode first
+        structured_llm = llm.with_structured_output(Perspectives, method="json_mode")
+        analysts = structured_llm.invoke([SystemMessage(content=system_message)]+[HumanMessage(content="Generate the set of analysts.")])
+    except Exception as e:
+        # Fallback: use without method specification
+        print(f"Structured output with json_mode failed: {e}. Using standard structured output...")
+        try:
+            structured_llm = llm.with_structured_output(Perspectives)
+            analysts = structured_llm.invoke([SystemMessage(content=system_message)]+[HumanMessage(content="Generate the set of analysts.")])
+        except Exception as e2:
+            # Last resort fallback: request raw JSON and parse it
+            print(f"Structured output failed: {e2}. Using raw JSON extraction...")
+            result = llm.invoke([SystemMessage(content=system_message)]+[HumanMessage(content="Generate the set of analysts. Return ONLY valid JSON.")])
+            import json
+            try:
+                # Try to extract JSON from the response
+                json_str = result.content
+                # Find JSON in the response if there's extra text
+                if '{' in json_str:
+                    json_str = json_str[json_str.find('{'):json_str.rfind('}')+1]
+                parsed = json.loads(json_str)
+                analysts = Perspectives(**parsed)
+            except Exception as e3:
+                print(f"Failed to parse JSON: {e3}")
+                raise
     
     # Write the list of analysis to state
     return {"analysts": analysts.analysts}
@@ -152,53 +191,107 @@ First, analyze the full conversation.
 
 Pay particular attention to the final question posed by the analyst.
 
-Convert this final question into a well-structured web search query""")
+Convert this final question into a well-structured web search query. Return ONLY valid JSON with the format: {{"search_query": "your search query here"}}""")
+
+def _extract_search_query(result):
+    """Safely extract a string query from structured LLM output or fallback to text parsing"""
+    if result is None:
+        return None
+    
+    # If it's already a string, try to extract the query
+    if isinstance(result, str):
+        sq = result.strip()
+    # If it has a search_query attribute (Pydantic model)
+    elif hasattr(result, "search_query"):
+        sq = getattr(result, "search_query")
+    # If it's a dict
+    elif isinstance(result, dict):
+        sq = result.get("search_query")
+    else:
+        sq = str(result)
+    
+    if sq is None:
+        return None
+    
+    sq = str(sq).strip()
+    # Remove markdown formatting if present
+    if sq.startswith("**") or sq.startswith("*"):
+        sq = sq.lstrip("*").strip()
+    if sq.endswith("**") or sq.endswith("*"):
+        sq = sq.rstrip("*").strip()
+    # Remove quotes if wrapped
+    if (sq.startswith('"') and sq.endswith('"')) or (sq.startswith("'") and sq.endswith("'")):
+        sq = sq[1:-1].strip()
+    
+    return sq or None
 
 def search_web(state: InterviewState):
-    
     """ Retrieve docs from web search """
-
-    # Search
-    tavily_search = TavilySearch(max_results=3)
-
-    # Search query
-    structured_llm = llm.with_structured_output(SearchQuery)
-    search_query = structured_llm.invoke([search_instructions]+state['messages'])
+    try:
+        # Try structured output first, but use a fallback to raw LLM if it fails
+        structured_llm = llm.with_structured_output(SearchQuery, method="json_mode")
+        search_query_result = structured_llm.invoke([search_instructions] + state["messages"])
+        sq = _extract_search_query(search_query_result)
+    except Exception as e:
+        # Fallback: ask LLM to just give us the query as plain text
+        print(f"Structured output failed: {e}. Using fallback approach...")
+        fallback_prompt = "Based on the conversation, what is the search query? Reply with ONLY the search query text, no other text."
+        result = llm.invoke([search_instructions] + state["messages"] + [HumanMessage(content=fallback_prompt)])
+        sq = _extract_search_query(result.content)
     
-    # Search
-    data = tavily_search.invoke({"query": search_query.search_query})
-    search_docs = data.get("results", data)
+    if not sq:
+        print("Warning: LLM did not produce a valid web search query; skipping web search.")
+        return {"context": []}
 
-     # Format
+    try:
+        tavily_search = TavilySearch(max_results=3)
+        data = tavily_search.invoke({"query": sq})
+        search_docs = data.get("results", data)
+    except Exception as e:
+        print("Web search tool error:", e)
+        return {"context": []}
+
     formatted_search_docs = "\n\n---\n\n".join(
         [
             f'<Document href="{doc["url"]}"/>\n{doc["content"]}\n</Document>'
             for doc in search_docs
         ]
     )
-
-    return {"context": [formatted_search_docs]} 
+    return {"context": [formatted_search_docs]}
 
 def search_wikipedia(state: InterviewState):
-    
     """ Retrieve docs from wikipedia """
-
-    # Search query
-    structured_llm = llm.with_structured_output(SearchQuery)
-    search_query = structured_llm.invoke([search_instructions]+state['messages'])
+    try:
+        # Try structured output first, but use a fallback to raw LLM if it fails
+        structured_llm = llm.with_structured_output(SearchQuery, method="json_mode")
+        search_query_result = structured_llm.invoke([search_instructions] + state["messages"])
+        sq = _extract_search_query(search_query_result)
+    except Exception as e:
+        # Fallback: ask LLM to just give us the query as plain text
+        print(f"Structured output failed: {e}. Using fallback approach...")
+        fallback_prompt = "Based on the conversation, what is the search query? Reply with ONLY the search query text, no other text."
+        result = llm.invoke([search_instructions] + state["messages"] + [HumanMessage(content=fallback_prompt)])
+        sq = _extract_search_query(result.content)
     
-    # Search
-    search_docs = WikipediaLoader(query=search_query.search_query, 
-                                  load_max_docs=2).load()
+    if not sq:
+        print("Warning: LLM did not produce a valid wikipedia search query; skipping wikipedia search.")
+        return {"context": []}
 
-     # Format
+    try:
+        search_docs = WikipediaLoader(query=sq, load_max_docs=2).load()
+    except Exception as e:
+        print("Wikipedia loader error:", e)
+        return {"context": []}
+
+    if not search_docs:
+        return {"context": []}
+
     formatted_search_docs = "\n\n---\n\n".join(
         [
-            f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/>\n{doc.page_content}\n</Document>'
+            f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page","")}"/>\n{doc.page_content}\n</Document>'
             for doc in search_docs
         ]
     )
-
     return {"context": [formatted_search_docs]} 
 
 # Generate expert answer

@@ -1,0 +1,31 @@
+from langchain_core.output_parsers.base import OutputParserException
+import json, re
+
+# call the structured LLM and handle parsing errors
+try:
+    analysts_out = structured_llm.invoke([SystemMessage(content=system_message)] + [HumanMessage(content="Generate the set of analysts.")])
+    analysts = analysts_out.analysts
+except OutputParserException as e:
+    # debug: show raw output for prompt tuning
+    raw = getattr(e, "output", None)
+    print("OutputParserException - raw completion:", raw)
+
+    # attempt a robust JSON extract from the raw text
+    text = raw if raw else llm.invoke([SystemMessage(content=system_message), HumanMessage(content="Generate the set of analysts.")]).content
+    m = re.search(r'\{.*\}', text, flags=re.S)
+    if not m:
+        print("No JSON found in LLM response; returning empty analysts list")
+        return {"analysts": []}
+
+    j = json.loads(m.group())
+    # map alternative keys into required keys
+    mapped = []
+    for a in j.get("analysts", []):
+        mapped.append({
+            "affiliation": a.get("affiliation") or a.get("perspective") or a.get("theme") or "",
+            "name": a.get("name") or a.get("id") or "",
+            "role": a.get("role",""),
+            "description": a.get("description") or a.get("perspective") or a.get("analysis_style") or ""
+        })
+    # validate / construct Pydantic objects
+    analysts = [Analyst(**m) for m in mapped]
